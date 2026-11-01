@@ -1,0 +1,105 @@
+name: Build Linux
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Official prebuilt llama.cpp release (ggml-org/llama.cpp), built on Ubuntu 22.04:
+  # Vulkan backend + CPU backends for every CPU generation, chosen automatically at run time.
+  LLAMA_CPP_TAG: b10621
+
+jobs:
+  build:
+    # 22.04 on purpose: the result runs on any distro with glibc >= 2.35.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Read app version
+        run: echo "APP_VERSION=$(python tools/get_version.py)" >> "$GITHUB_ENV"
+
+      - name: Install system packages (Qt runtime libraries for PyInstaller)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils libvulkan1 \
+            libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0 libegl1 libgl1 \
+            libdbus-1-3 libfontconfig1 libglib2.0-0
+
+      - name: Download llama.cpp (Vulkan + CPU)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p llama-dl llama-bin
+          if [ "$LLAMA_CPP_TAG" = "latest" ]; then TAGARG=""; else TAGARG="$LLAMA_CPP_TAG"; fi
+          gh release download $TAGARG --repo ggml-org/llama.cpp --pattern "llama-*-bin-ubuntu-vulkan-x64.tar.gz" --dir llama-dl
+          ls -l llama-dl
+          tar -xzf llama-dl/*.tar.gz -C llama-bin
+          SRV="$(find llama-bin -type f -name llama-server | head -n1)"
+          [ -n "$SRV" ] || { echo "llama-server not found in the archive - check LLAMA_CPP_TAG and the asset name"; exit 1; }
+          echo "LLAMA_BIN_DIR=$(dirname "$SRV")" >> "$GITHUB_ENV"
+          ls -lh "$(dirname "$SRV")"
+
+      - name: Build app with PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "pyinstaller>=6.6"
+          pyinstaller notus.spec --noconfirm --clean
+
+      - name: Copy backend into the app folder
+        run: |
+          mkdir -p dist/Notus/backend
+          cp -a "$LLAMA_BIN_DIR"/. dist/Notus/backend/
+          chmod +x dist/Notus/backend/llama-*
+          # portable.flag: settings, chats and the model list stay inside the extracted folder
+          touch dist/Notus/portable.flag
+          ldd dist/Notus/backend/llama-server || true
+
+      - name: Smoke test
+        env:
+          NOTUS_DATA_DIR: ${{ runner.temp }}/notus-selftest
+        run: |
+          QT_QPA_PLATFORM=offscreen dist/Notus/Notus --selftest
+          dist/Notus/backend/llama-server --version
+          dist/Notus/backend/llama-server --list-devices || true
+
+      - name: Package (tar.gz + .run)
+        run: |
+          tar -C dist -czf "Notus-${APP_VERSION}-linux-x86_64.tar.gz" Notus
+          bash packaging/linux/make_run.sh "$APP_VERSION" "Notus-${APP_VERSION}-linux-x86_64.tar.gz" "Notus-${APP_VERSION}-linux-x86_64.run"
+          ls -lh Notus-*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Notus-Linux
+          path: |
+            Notus-${{ env.APP_VERSION }}-linux-x86_64.tar.gz
+            Notus-${{ env.APP_VERSION }}-linux-x86_64.run
+          compression-level: 0
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="v${APP_VERSION}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Notus ${APP_VERSION}" --generate-notes --target "$GITHUB_SHA" || true
+          gh release upload "$TAG" "Notus-${APP_VERSION}-linux-x86_64.tar.gz" "Notus-${APP_VERSION}-linux-x86_64.run" --clobber

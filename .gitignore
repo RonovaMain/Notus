@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+Output/
+llama.cpp/
+*.egg-info/
+.idea/
+.vscode/
+crash.log
