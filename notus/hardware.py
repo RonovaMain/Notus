@@ -68,7 +68,7 @@ def query_gpus() -> list[GPU]:
         try:
             out = subprocess.run(
                 [exe, f"--query-gpu={cols}", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=8, creationflags=NO_WINDOW,
+                capture_output=True, text=True, timeout=8, creationflags=NO_WINDOW, stdin=subprocess.DEVNULL,
             )
         except (OSError, subprocess.SubprocessError):
             return []

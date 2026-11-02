@@ -16,6 +16,7 @@ class StatsPoller(QThread):
         super().__init__(parent)
         self.static = static_hw
         self.pid = 0
+        self.enabled = True
         self._run = True
 
     def stop(self) -> None:
@@ -24,6 +25,8 @@ class StatsPoller(QThread):
     def run(self) -> None:
         while self._run:
             try:
+                if not self.enabled:
+                    raise RuntimeError("monitor off")
                 hw = snapshot(self.static)
                 rss = 0
                 if self.pid:

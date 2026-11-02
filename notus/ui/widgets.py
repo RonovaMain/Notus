@@ -1,12 +1,13 @@
 """Reusable widgets: chat bubbles, chat view, slider+spin, memory bar."""
 from __future__ import annotations
 
+import base64
 import html
 
 from PyQt6.QtCore import QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath
-from PyQt6.QtWidgets import (QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QScrollArea,
-                             QSizePolicy, QSlider, QVBoxLayout, QWidget)
+from PyQt6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPixmap
+from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
+                             QScrollArea, QSizePolicy, QSlider, QVBoxLayout, QWidget)
 
 from .. import markdown_lite
 from ..i18n import tr
@@ -73,10 +74,26 @@ class Bubble(QFrame):
     def __init__(self, role: str, colors: dict) -> None:
         super().__init__()
         self.role, self.c = role, colors
+        self._raw = ""
+        self._think_open = False
+        self._think_text = ""
         self.setObjectName("UserBubble" if role == "user" else "BotBubble")
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._menu)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 10, 14, 10)
         lay.setSpacing(6)
+        self.attach = QWidget()
+        self.attach_lay = QHBoxLayout(self.attach)
+        self.attach_lay.setContentsMargins(0, 0, 0, 0)
+        self.attach_lay.setSpacing(8)
+        self.attach.hide()
+        self.think_btn = QPushButton()
+        self.think_btn.setObjectName("Chip")
+        self.think_btn.setFlat(True)
+        self.think_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.think_btn.clicked.connect(self._toggle_think)
+        self.think_btn.hide()
         self.think = QLabel()
         self.body = QLabel()
         for lbl in (self.think, self.body):
@@ -89,20 +106,64 @@ class Bubble(QFrame):
         self.meta = QLabel()
         self.meta.setObjectName("Muted")
         self.meta.hide()
+        lay.addWidget(self.attach)
+        lay.addWidget(self.think_btn, 0, Qt.AlignmentFlag.AlignLeft)
         lay.addWidget(self.think)
         lay.addWidget(self.body)
         lay.addWidget(self.meta)
 
-    def set_content(self, text: str, reasoning: str = "") -> None:
+    def _menu(self, pos) -> None:
+        menu = QMenu(self)
+        act = menu.addAction(tr("Copy message"))
+        if menu.exec(self.mapToGlobal(pos)) is act:
+            QApplication.clipboard().setText(self._raw)
+
+    def _toggle_think(self) -> None:
+        self._think_open = not self._think_open
+        self._refresh_think()
+
+    def _refresh_think(self) -> None:
+        self.think_btn.setText(("▾ " if self._think_open else "▸ ") + tr("Thinking") + " (%d)" % len(self._think_text))
+        self.think.setVisible(self._think_open)
+
+    def set_attachments(self, files, images) -> None:
+        while self.attach_lay.count():
+            w = self.attach_lay.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+        for u in images or []:
+            pm = QPixmap()
+            if pm.loadFromData(base64.b64decode(u.split(",", 1)[-1])):
+                lbl = QLabel()
+                lbl.setPixmap(pm.scaledToHeight(110, Qt.TransformationMode.SmoothTransformation))
+                self.attach_lay.addWidget(lbl)
+        for f in files or []:
+            lbl = QLabel("📎 " + f.get("name", "file"))
+            lbl.setStyleSheet("background:%s; border-radius:8px; padding:3px 8px;" % self.c["inline_bg"])
+            self.attach_lay.addWidget(lbl)
+        self.attach_lay.addStretch(1)
+        self.attach.setVisible(bool(images or files))
+
+    def set_content(self, text: str, reasoning: str = "", show_reasoning: bool = True) -> None:
+        self._raw = text
         if self.role == "user":
             self.body.setText(html.escape(text).replace("\n", "<br>"))
+            self.body.setVisible(bool(text))
+            return
+        muted = self.c["muted"]
+        if text:
+            self.body.setText(markdown_lite.render(text, self.c))
+        elif reasoning:
+            self.body.setText("<span style='color:%s'><i>%s</i></span>" % (muted, html.escape(tr("Thinking…"))))
         else:
-            self.body.setText(markdown_lite.render(text, self.c) if text else "<span style='color:%s'>…</span>" % self.c["muted"])
-        if reasoning:
-            self.think.setText("<i style='color:%s'>%s %s</i>" % (
-                self.c["muted"], html.escape(tr("Thinking:")), html.escape(reasoning).replace("\n", "<br>")))
-            self.think.show()
+            self.body.setText("<span style='color:%s'>…</span>" % muted)
+        self._think_text = reasoning
+        if reasoning and show_reasoning:
+            self.think.setText("<span style='color:%s'><i>%s</i></span>" % (muted, html.escape(reasoning).replace("\n", "<br>")))
+            self.think_btn.show()
+            self._refresh_think()
         else:
+            self.think_btn.hide()
             self.think.hide()
 
     def set_error(self, text: str) -> None:
@@ -208,10 +269,10 @@ class MemoryBar(QWidget):
         used = sum(s[1] for s in self.segs)
         over = self.capacity > 0 and used > self.capacity
         p.setPen(QColor(self.c["text"]))
-        p.drawText(QRectF(0, 0, w, 18), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.title)
+        p.drawText(QRectF(0, 0, w, 18), (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter).value, self.title)
         right = "%.1f / %.1f GB" % (used / 1024, self.capacity / 1024) if self.capacity else "%.1f GB" % (used / 1024)
         p.setPen(QColor(self.c["danger"] if over else self.c["muted"]))
-        p.drawText(QRectF(0, 0, w, 18), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), right)
+        p.drawText(QRectF(0, 0, w, 18), (Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter).value, right)
         bar = QRectF(0, 24, w, 12)
         path = QPainterPath()
         path.addRoundedRect(bar, 6, 6)
@@ -240,5 +301,5 @@ class MemoryBar(QWidget):
             p.drawEllipse(QRectF(x, 46, 9, 9))
             text = "%s %.1f GB" % (label, mb / 1024)
             p.setPen(QColor(self.c["muted"]))
-            p.drawText(QRectF(x + 14, 42, w, 18), int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
+            p.drawText(QRectF(x + 14, 42, w, 18), (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter).value, text)
             x += 14 + fm.horizontalAdvance(text) + 16

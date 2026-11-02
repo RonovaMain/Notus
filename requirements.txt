@@ -1,2 +1,4 @@
 PyQt6>=6.6,<7
 psutil>=5.9
+pypdf>=4.0
+segno>=1.6

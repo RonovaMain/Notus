@@ -57,11 +57,14 @@ jobs:
           echo "LLAMA_BIN_DIR=$(dirname "$SRV")" >> "$GITHUB_ENV"
           ls -lh "$(dirname "$SRV")"
 
-      - name: Build app with PyInstaller
+      - name: Unit / UI smoke tests (PyQt-free mock, fast)
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt "pyinstaller>=6.6"
-          pyinstaller notus.spec --noconfirm --clean
+          python tests/smoke_mock.py
+
+      - name: Build app with PyInstaller
+        run: pyinstaller notus.spec --noconfirm --clean
 
       - name: Copy backend into the app folder
         run: |
@@ -76,7 +79,7 @@ jobs:
         env:
           NOTUS_DATA_DIR: ${{ runner.temp }}/notus-selftest
         run: |
-          QT_QPA_PLATFORM=offscreen dist/Notus/Notus --selftest
+          timeout 120 env QT_QPA_PLATFORM=offscreen dist/Notus/Notus --selftest || { echo "---- crash.log ----"; cat "$NOTUS_DATA_DIR/crash.log" 2>/dev/null; exit 1; }
           dist/Notus/backend/llama-server --version
           dist/Notus/backend/llama-server --list-devices || true
 

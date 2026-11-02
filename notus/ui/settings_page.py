@@ -4,7 +4,7 @@ from __future__ import annotations
 import subprocess
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from .. import paths
@@ -25,6 +25,7 @@ def _card() -> tuple[QFrame, QVBoxLayout]:
 
 class SettingsPage(QWidget):
     theme_changed = pyqtSignal(dict)
+    modules_changed = pyqtSignal()
     devices_requested = pyqtSignal()
 
     def __init__(self, ctx, parent=None) -> None:
@@ -70,13 +71,16 @@ class SettingsPage(QWidget):
         for name in theme.ACCENTS:
             self.accent.addItem(name.capitalize(), name)
         self.accent.setCurrentIndex(max(0, self.accent.findData(s.accent)))
-        self.font = QSpinBox()
-        self.font.setRange(8, 16)
-        self.font.setValue(s.font_size)
+        self.show_think = QCheckBox(tr("Show the model's thinking text in answers (collapsed)"))
+        self.show_think.setChecked(s.show_thinking)
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(8, 16)
+        self.font_spin.setValue(s.font_size)
         for i, (lab, w) in enumerate(((tr("Language (restart required)"), self.lang), (tr("Theme"), self.theme),
-                                      (tr("Accent colour"), self.accent), (tr("Font size"), self.font))):
+                                      (tr("Accent colour"), self.accent), (tr("Font size"), self.font_spin))):
             g.addWidget(QLabel(lab), i, 0)
             g.addWidget(w, i, 1)
+        g.addWidget(self.show_think, 4, 1)
         col.addWidget(card)
 
         # backend
@@ -115,11 +119,34 @@ class SettingsPage(QWidget):
         g.addLayout(brow, 0, 1)
         g.addWidget(QLabel(tr("Compute device")), 1, 0)
         g.addLayout(drow, 1, 1)
-        g.addWidget(QLabel(tr("Local port")), 2, 0)
+        g.addWidget(QLabel(tr("Internal backend port")), 2, 0)
         g.addWidget(self.port, 2, 1)
         g.addWidget(QLabel(tr("Unload the model when idle for")), 3, 0)
         g.addWidget(self.idle, 3, 1)
         note = QLabel(tr("The backend only listens on 127.0.0.1 (this computer). Notus never connects to the internet."))
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        col.addWidget(card)
+
+        # modules
+        card, lay = _card()
+        h = QLabel(tr("Modules"))
+        h.setObjectName("H2")
+        lay.addWidget(h)
+        self.module_boxes = {}
+        for key, label in (("mod_vision", tr("Images (vision models)")),
+                           ("mod_files", tr("File attachments (documents, PDF, DOCX)")),
+                           ("mod_assistants", tr("Assistants")),
+                           ("mod_thinking", tr("Thinking switch")),
+                           ("mod_share", tr("Remote access & API page")),
+                           ("mod_monitor", tr("Live RAM / VRAM monitor in the status bar"))):
+            cb = QCheckBox(label)
+            cb.setChecked(getattr(s, key))
+            lay.addWidget(cb)
+            self.module_boxes[key] = cb
+        note = QLabel(tr("A disabled module is not loaded and uses no memory or processor time. "
+                         "Vision is additionally switched on per model in “Models”."))
         note.setObjectName("Muted")
         note.setWordWrap(True)
         lay.addWidget(note)
@@ -164,15 +191,19 @@ class SettingsPage(QWidget):
     def apply(self) -> None:
         s = self.ctx.store.s
         s.language, s.theme = self.lang.currentData(), self.theme.currentData()
-        s.accent, s.font_size = self.accent.currentData(), self.font.value()
+        s.accent, s.font_size = self.accent.currentData(), self.font_spin.value()
+        for key, cb in self.module_boxes.items():
+            setattr(s, key, cb.isChecked())
         old_backend = s.backend_dir
         s.backend_dir, s.port = self.backend.text().strip(), self.port.value()
         s.device = self.device.currentData() or "auto"
         s.auto_unload_minutes = self.idle.value()
+        s.show_thinking = self.show_think.isChecked()
         self.ctx.store.save()
         colors = theme.apply(QApplication.instance(), s.theme, s.accent, s.font_size)
         self.ctx.colors = colors
         self.theme_changed.emit(colors)
+        self.modules_changed.emit()
         if s.backend_dir != old_backend:
             self.devices_requested.emit()
 
@@ -224,7 +255,7 @@ class SettingsPage(QWidget):
             for flags in (["--version"], ["--list-devices"]):
                 try:
                     r = subprocess.run([str(exe)] + flags, capture_output=True, timeout=60, cwd=str(exe.parent),
-                                       creationflags=NO_WINDOW, env=_backend_env(exe.parent))
+                                       creationflags=NO_WINDOW, env=_backend_env(exe.parent), stdin=subprocess.DEVNULL)
                     out.append("$ llama-server %s  (exit %d)\n%s" % (flags[0], r.returncode,
                                (r.stdout + r.stderr).decode("utf-8", "replace").strip()))
                 except (OSError, subprocess.SubprocessError) as e:

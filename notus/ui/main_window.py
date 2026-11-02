@@ -5,22 +5,28 @@ import time
 from collections import deque
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
+from PyQt6.QtGui import QKeySequence, QPixmap, QShortcut
+from PyQt6.QtWidgets import (QButtonGroup, QFileDialog, QFrame, QInputDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
                              QMenu, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__, paths
 from ..backend import ServerManager
-from ..chats import ChatStore
+from ..chats import ChatStore, export_markdown
 from ..context import AppContext
 from ..hardware import detect_hardware
 from ..i18n import tr
 from ..monitor import DeviceProbe, StatsPoller
+from ..assistants import ensure_seeded
+from ..share import ShareController
 from .about_page import AboutPage
+from .assistants_page import AssistantsPage
 from .chat_page import ChatPage
 from .dialogs import LogDialog
 from .models_page import ModelsPage
 from .settings_page import SettingsPage
+from .share_page import SharePage
+
+PAGE_CHAT, PAGE_ASSISTANTS, PAGE_MODELS, PAGE_SHARE, PAGE_SETTINGS, PAGE_ABOUT = range(6)
 
 
 class MainWindow(QMainWindow):
@@ -38,6 +44,8 @@ class MainWindow(QMainWindow):
         self.log = deque(maxlen=4000)
         self.log_dialog: LogDialog | None = None
         self._chat_list = self.chats.list_all()
+        ensure_seeded(store)
+        self.share = ShareController(self.ctx, self)
         self._build()
         self.server.log_line.connect(self._on_log)
         self.server.failed.connect(self._on_failed)
@@ -51,6 +59,8 @@ class MainWindow(QMainWindow):
         self.idle_timer = QTimer(self)
         self.idle_timer.timeout.connect(self._check_idle)
         self.idle_timer.start(30000)
+        QShortcut(QKeySequence("Ctrl+N"), self, activated=self.new_chat)
+        self.apply_modules()
         if self._chat_list:
             self._open_chat(self._chat_list[0].id)
         else:
@@ -96,7 +106,7 @@ class MainWindow(QMainWindow):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self.nav_buttons = []
-        for i, text in enumerate((tr("Chat"), tr("Models"), tr("Settings"), tr("About"))):
+        for i, text in enumerate((tr("Chat"), tr("Assistants"), tr("Models"), tr("Remote & API"), tr("Settings"), tr("About"))):
             b = QPushButton(text)
             b.setObjectName("Nav")
             b.setCheckable(True)
@@ -114,15 +124,20 @@ class MainWindow(QMainWindow):
         self.models_page = ModelsPage(self.ctx)
         self.settings_page = SettingsPage(self.ctx)
         self.about_page = AboutPage(self.ctx)
-        for p in (self.chat_page, self.models_page, self.settings_page, self.about_page):
+        self.assistants_page = AssistantsPage(self.ctx)
+        self.share_page = SharePage(self.ctx, self.share)
+        for p in (self.chat_page, self.assistants_page, self.models_page, self.share_page, self.settings_page, self.about_page):
             self.stack.addWidget(p)
         h.addWidget(self.stack, 1)
         self.chat_page.chat_changed.connect(self._on_chat_changed)
-        self.chat_page.open_models.connect(lambda: self.show_page(1))
+        self.chat_page.open_models.connect(lambda: self.show_page(PAGE_MODELS))
+        self.assistants_page.assistants_changed.connect(self.chat_page.refresh_assistants)
+        self.store.models_changed.connect(self.share_page.refresh_models)
         self.chat_page.show_log.connect(self.open_log)
         self.models_page.load_requested.connect(self._load_from_models)
         self.settings_page.theme_changed.connect(self._on_theme)
         self.settings_page.devices_requested.connect(self.refresh_devices)
+        self.settings_page.modules_changed.connect(self.apply_modules)
 
         self.lbl_state = QLabel("")
         self.lbl_ram = QLabel("")
@@ -138,10 +153,12 @@ class MainWindow(QMainWindow):
     def show_page(self, idx: int) -> None:
         self.stack.setCurrentIndex(idx)
         self.nav_buttons[idx].setChecked(True)
-        if idx == 1:
+        if idx == PAGE_MODELS:
             self.models_page.on_show()
-        elif idx == 2:
+        elif idx == PAGE_SETTINGS:
             self.settings_page.refresh_hw()
+        elif idx == PAGE_ASSISTANTS:
+            self.assistants_page.refresh_list()
 
     # ---- chats ---------------------------------------------------------
     def _refresh_chat_list(self, select_id: str | None = None) -> None:
@@ -189,9 +206,23 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         menu = QMenu(self)
+        act_ren = menu.addAction(tr("Rename…"))
+        act_exp = menu.addAction(tr("Export as Markdown…"))
         act = menu.addAction(tr("Delete chat"))
-        if menu.exec(self.chat_list.mapToGlobal(pos)) is act:
-            cid = item.data(Qt.ItemDataRole.UserRole)
+        chosen = menu.exec(self.chat_list.mapToGlobal(pos))
+        cid = item.data(Qt.ItemDataRole.UserRole)
+        chat = next((c for c in self._chat_list if c.id == cid), None)
+        if chosen is act_ren and chat is not None:
+            title, ok = QInputDialog.getText(self, tr("Rename…"), tr("Chat title"), text=chat.title)
+            if ok and title.strip():
+                chat.title = title.strip()[:80]
+                self.chats.save(chat)
+                self._refresh_chat_list(self.chat_page.chat.id if self.chat_page.chat else None)
+        elif chosen is act_exp and chat is not None:
+            path, _ = QFileDialog.getSaveFileName(self, tr("Export as Markdown…"), (chat.title or "chat") + ".md", "Markdown (*.md)")
+            if path:
+                export_markdown(chat, path, tr("You"), "Notus")
+        elif chosen is act:
             was_current = self.chat_page.chat is not None and self.chat_page.chat.id == cid
             self.chats.delete(cid)
             self._chat_list = [c for c in self._chat_list if c.id != cid]
@@ -207,7 +238,7 @@ class MainWindow(QMainWindow):
     def _load_from_models(self, model_id: str) -> None:
         e = self.store.get_model(model_id)
         if e:
-            self.show_page(0)
+            self.show_page(PAGE_CHAT)
             self.chat_page.refresh_models()
             self.server.load(e, self.store.s, self.ctx.hw)
 
@@ -245,6 +276,21 @@ class MainWindow(QMainWindow):
             self.lbl_gpu.setText("")
         self.lbl_be.setText((tr("Backend") + " %.1f GB" % (rss_mb / 1024)) if rss_mb else "")
 
+    def apply_modules(self) -> None:
+        s = self.store.s
+        self.nav_buttons[PAGE_ASSISTANTS].setVisible(s.mod_assistants)
+        self.nav_buttons[PAGE_SHARE].setVisible(s.mod_share)
+        self.poller.enabled = s.mod_monitor
+        if not s.mod_monitor:
+            self.lbl_ram.setText("")
+            self.lbl_gpu.setText("")
+            self.lbl_be.setText("")
+        self.chat_page.apply_modules()
+        if (self.stack.currentIndex() == PAGE_ASSISTANTS and not s.mod_assistants) or \
+                (self.stack.currentIndex() == PAGE_SHARE and not s.mod_share):
+            self.show_page(PAGE_CHAT)
+        self.share.apply()
+
     def refresh_devices(self) -> None:
         if self._probe is not None and self._probe.isRunning():
             return
@@ -256,13 +302,14 @@ class MainWindow(QMainWindow):
         self.ctx.devices = devices
         self.settings_page.populate_devices()
         self.settings_page.refresh_hw()
-        if self.stack.currentIndex() == 1:
+        if self.stack.currentIndex() == PAGE_MODELS:
             self.models_page.on_show()
 
     def _check_idle(self) -> None:
         minutes = self.store.s.auto_unload_minutes
         cp = self.chat_page
-        if minutes > 0 and self.server.state == "ready" and cp.worker is None and time.time() - cp.last_activity > minutes * 60:
+        last = max(cp.last_activity, self.share.api_activity)
+        if minutes > 0 and self.server.state == "ready" and cp.worker is None and time.time() - last > minutes * 60:
             self.server.unload()
 
     def _on_theme(self, colors: dict) -> None:
@@ -271,17 +318,23 @@ class MainWindow(QMainWindow):
 
     # ---- drag & drop ---------------------------------------------------
     def dragEnterEvent(self, e) -> None:
-        if e.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(".gguf") for u in e.mimeData().urls()):
+        if e.mimeData().hasUrls():
             e.acceptProposedAction()
 
     def dropEvent(self, e) -> None:
-        files = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile().lower().endswith(".gguf")]
-        self.show_page(1)
-        self.models_page.add_paths(files)
+        files = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+        models = [f for f in files if f.lower().endswith(".gguf")]
+        if models:                              # .gguf = new models, everything else = attachments for the chat
+            self.show_page(PAGE_MODELS)
+            self.models_page.add_paths(models)
+        elif files:
+            self.show_page(PAGE_CHAT)
+            self.chat_page.attach_paths(files)
 
     # ---- shutdown ------------------------------------------------------
     def closeEvent(self, e) -> None:
         self.poller.stop()
+        self.share.stop()
         if self._probe is not None:
             self._probe.wait(5000)
         self.chat_page.shutdown()

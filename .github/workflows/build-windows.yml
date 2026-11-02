@@ -85,7 +85,13 @@ jobs:
         env:
           NOTUS_DATA_DIR: ${{ runner.temp }}\notus-selftest
         run: |
-          $p = Start-Process "dist\Notus\Notus.exe" -ArgumentList "--selftest" -Wait -PassThru
+          # starts the real frozen app headless; a crash writes crash.log, a hang is killed after 2 minutes
+          $p = Start-Process "dist\Notus\Notus.exe" -ArgumentList "--selftest" -PassThru
+          $finished = $p.WaitForExit(120000)
+          if (-not $finished) { $p.Kill() }
+          $crash = Join-Path $env:NOTUS_DATA_DIR "crash.log"
+          if (Test-Path $crash) { Write-Host "----- crash.log -----"; Get-Content $crash }
+          if (-not $finished) { throw "Notus --selftest hung (killed after 120 s)" }
           if ($p.ExitCode -ne 0) { throw "Notus --selftest failed with exit code $($p.ExitCode)" }
           & "dist\Notus\backend\llama-server.exe" --version
           if ($LASTEXITCODE -ne 0) { throw "llama-server.exe does not start (exit code $LASTEXITCODE) - a DLL is probably missing" }

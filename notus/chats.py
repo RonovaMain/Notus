@@ -52,3 +52,19 @@ class ChatStore:
             (self.dir / f"{chat_id}.json").unlink()
         except OSError:
             pass
+
+
+def export_markdown(chat: Chat, path: str, user_label: str = "You", bot_label: str = "Notus") -> None:
+    lines = ["# " + (chat.title or "Chat"), ""]
+    for m in chat.messages:
+        who = user_label if m["role"] == "user" else bot_label
+        lines.append("**%s:**" % who)
+        lines.append("")
+        for f in m.get("files") or []:
+            lines.append("*(attached: %s)*" % f.get("name", "file"))
+        if m.get("images"):
+            lines.append("*(%d image(s) attached)*" % len(m["images"]))
+        lines.append(m.get("content", ""))
+        lines += ["", "---", ""]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))

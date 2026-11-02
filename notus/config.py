@@ -1,6 +1,7 @@
 """Plain dataclasses describing settings. No Qt imports here."""
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -28,6 +29,8 @@ class LoadSettings:
     use_mlock: bool = False
     jinja: bool = True
     chat_template: str = ""         # empty = use the template stored in the GGUF
+    reasoning_budget: int = -1      # -1 = unlimited, 0 = no thinking at all, N = max thinking tokens
+    image_max_tokens: int = 0       # 0 = model default; lower = faster image processing on old hardware
     extra_args: str = ""
 
 
@@ -42,6 +45,7 @@ class GenSettings:
     repeat_penalty: float = 1.1
     max_tokens: int = 1024
     seed: int = -1
+    think: str = "auto"             # auto | on | off  (models with a thinking mode, e.g. Qwen3)
 
 
 @dataclass
@@ -49,6 +53,8 @@ class ModelEntry:
     id: str
     name: str
     path: str
+    mmproj: str = ""               # vision projector (mmproj-*.gguf)
+    vision: bool = False            # load the projector (extra memory!) so the model can read images
     load: LoadSettings = field(default_factory=LoadSettings)
     gen: GenSettings = field(default_factory=GenSettings)
 
@@ -65,9 +71,28 @@ class ModelEntry:
             id=d.get("id") or uuid.uuid4().hex[:12],
             name=d.get("name") or Path(path).stem,
             path=path,
+            mmproj=d.get("mmproj") or "",
+            vision=bool(d.get("vision", False)),
             load=from_dict(LoadSettings, d.get("load")),
             gen=from_dict(GenSettings, d.get("gen")),
         )
+
+
+@dataclass
+class Assistant:
+    """A reusable persona: system prompt + optional overrides for sampling and thinking."""
+    id: str
+    name: str
+    system_prompt: str = ""
+    temperature: float = -1.0       # -1 = keep the model's own temperature
+    think: str = "inherit"          # inherit | auto | on | off
+    builtin_key: str = ""           # non-empty for the shipped assistants
+
+    @staticmethod
+    def from_dict(d) -> "Assistant":
+        d = dict(d or {})
+        d.setdefault("id", uuid.uuid4().hex[:12])
+        return from_dict(Assistant, d)
 
 
 @dataclass
@@ -83,4 +108,28 @@ class AppSettings:
     auto_unload_minutes: int = 0    # 0 = never
     last_model_id: str = ""
     show_params_panel: bool = True
+    show_thinking: bool = True      # show the model's reasoning text (collapsed) in bubbles
+    # --- optional modules (a disabled module is not loaded and costs nothing) ---
+    mod_vision: bool = True
+    mod_files: bool = True
+    mod_assistants: bool = True
+    mod_thinking: bool = True
+    mod_share: bool = True
+    mod_monitor: bool = True
+    last_assistant_id: str = ""
+    assistants_seeded: bool = False
+    # --- sharing (local API + web chat) ---
+    share_enabled: bool = False
+    share_lan: bool = False         # False = 127.0.0.1 only, True = 0.0.0.0 (local network)
+    share_port: int = 8080
+    share_key: str = ""
+    share_allow_switch: bool = True
+    share_autoload: bool = True
+    share_webui: bool = True
     models: list = field(default_factory=list)   # list[ModelEntry]
+    assistants: list = field(default_factory=list)   # list[Assistant]
+
+
+def vision_active(entry, settings) -> bool:
+    """True if images can be used with this model right now (module on, projector enabled and present)."""
+    return bool(settings.mod_vision and entry is not None and entry.vision and entry.mmproj and os.path.isfile(entry.mmproj))

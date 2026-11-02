@@ -39,7 +39,7 @@ QLabel { background: transparent; }
 QLabel#Muted { color: $muted; font-size: ${fs_small}pt; }
 QLabel#Title { font-size: ${fs_big}pt; font-weight: 700; }
 QLabel#H2 { font-size: ${fs_h2}pt; font-weight: 700; }
-QLabel#Brand { font-size: ${fs_big}pt; font-weight: 800; letter-spacing: 1px; }
+QLabel#Brand { font-size: ${fs_big}pt; font-weight: 800; }
 QFrame#UserBubble { background: $user_bubble; border-radius: 14px; }
 QFrame#BotBubble { background: $surface; border: 1px solid $border; border-radius: 14px; }
 QPushButton { background: $surface2; border: 1px solid $border; border-radius: 8px; padding: 7px 14px; }

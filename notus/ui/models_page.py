@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QGridLay
 
 from .. import paths
 from ..backend import backend_has_gpu
+from ..attachments import find_mmproj
 from ..config import LoadSettings, ModelEntry
 from ..estimator import auto_gpu_layers, estimate, suggest_defaults
 from ..gguf import GGUFError, is_first_shard_or_single, read_gguf
@@ -260,6 +261,45 @@ class ModelsPage(QWidget):
         self.template.addItems(TEMPLATES)
         self._add(g, tr("Chat template override"), self.template, tr("Leave empty to use the template stored in the GGUF file."))
 
+        self.vision_cb = QCheckBox(tr("Enable vision for this model (loads the projector, uses extra memory)"))
+        self.mmproj = QLineEdit()
+        self.mmproj.setPlaceholderText(tr("none — text only"))
+        b_mm = QPushButton(tr("Browse…"))
+        b_mm.clicked.connect(self._browse_mmproj)
+        b_mm_auto = QPushButton(tr("Find next to model"))
+        b_mm_auto.clicked.connect(self._auto_mmproj)
+        mmw = QWidget()
+        mmv = QVBoxLayout(mmw)
+        mmv.setContentsMargins(0, 0, 0, 0)
+        mmv.addWidget(self.vision_cb)
+        mmrow = QWidget()
+        mml = QHBoxLayout(mmrow)
+        mml.setContentsMargins(0, 0, 0, 0)
+        mmv.addWidget(mmrow)
+        mml.addWidget(self.mmproj, 1)
+        mml.addWidget(b_mm)
+        mml.addWidget(b_mm_auto)
+        self._add(g, tr("Vision projector (mmproj)"), mmw,
+                  tr("Lets the model read images. Needs the mmproj-*.gguf of this model. Reload the model after changing it."))
+
+        self.reasoning = QSpinBox()
+        self.reasoning.setRange(-1, 32768)
+        self.reasoning.setSpecialValueText(tr("Unlimited"))
+        self.image_tokens = QSpinBox()
+        self.image_tokens.setRange(0, 4096)
+        self.image_tokens.setSingleStep(64)
+        self.image_tokens.setSpecialValueText(tr("Default"))
+        rw = QWidget()
+        rl = QHBoxLayout(rw)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.addWidget(QLabel(tr("thinking tokens:")))
+        rl.addWidget(self.reasoning)
+        rl.addWidget(QLabel(tr("tokens per image:")))
+        rl.addWidget(self.image_tokens)
+        rl.addStretch(1)
+        self._add(g, tr("Thinking & images"), rw,
+                  tr("0 = no thinking at all. Fewer tokens per image = much faster on old hardware."))
+
         self.extra = QLineEdit()
         self.extra.setPlaceholderText("--rope-freq-base 10000 --no-warmup")
         self._add(g, tr("Extra llama-server arguments"), self.extra, tr("Advanced: passed to the backend as-is."))
@@ -278,6 +318,10 @@ class ModelsPage(QWidget):
         ed.addLayout(row)
         ed.addStretch(1)
 
+        self.mmproj.editingFinished.connect(self._changed)
+        self.vision_cb.toggled.connect(self._changed)
+        self.reasoning.valueChanged.connect(self._changed)
+        self.image_tokens.valueChanged.connect(self._changed)
         for sp in (self.n_ctx, self.threads, self.threads_b, self.n_batch, self.n_ubatch):
             sp.valueChanged.connect(self._changed)
         self.ngl.valueChanged.connect(self._changed)
@@ -372,6 +416,7 @@ class ModelsPage(QWidget):
                 errors.append("%s: %s" % (os.path.basename(f), e))
                 continue
             entry = ModelEntry.create(f, suggest_defaults(info, self._vram_total()))
+            entry.mmproj = find_mmproj(f)
             if self.ctx.store.add_entry(entry):
                 added += 1
                 last = entry.id
@@ -418,6 +463,10 @@ class ModelsPage(QWidget):
         self.jinja.setChecked(L.jinja)
         self.template.setCurrentText(L.chat_template)
         self.extra.setText(L.extra_args)
+        self.mmproj.setText(e.mmproj)
+        self.vision_cb.setChecked(e.vision)
+        self.reasoning.setValue(L.reasoning_budget)
+        self.image_tokens.setValue(L.image_max_tokens)
         self._loading = False
         self._refresh_info()
         self._refresh_planner()
@@ -434,6 +483,9 @@ class ModelsPage(QWidget):
         L.cache_type_v = self.kv_v.currentData() or "f16"
         L.use_mmap, L.use_mlock, L.jinja = self.mmap.isChecked(), self.mlock.isChecked(), self.jinja.isChecked()
         L.chat_template, L.extra_args = self.template.currentText().strip(), self.extra.text().strip()
+        L.reasoning_budget, L.image_max_tokens = self.reasoning.value(), self.image_tokens.value()
+        self.entry.mmproj = self.mmproj.text().strip()
+        self.entry.vision = self.vision_cb.isChecked() and bool(self.entry.mmproj)
 
     def _changed(self, *_a) -> None:
         if self._loading or not self.entry:
@@ -441,6 +493,21 @@ class ModelsPage(QWidget):
         self._collect()
         self._refresh_planner()
         self.ctx.store.save_later()
+
+    def _browse_mmproj(self) -> None:
+        start = str(Path(self.entry.path).parent) if self.entry else ""
+        f, _ = QFileDialog.getOpenFileName(self, tr("Vision projector (mmproj)"), start, "GGUF (*.gguf)")
+        if f:
+            self.mmproj.setText(f)
+            self._changed()
+
+    def _auto_mmproj(self) -> None:
+        if self.entry:
+            found = find_mmproj(self.entry.path)
+            self.mmproj.setText(found)
+            self._changed()
+            if not found:
+                QMessageBox.information(self, tr("Notus"), tr("No mmproj-*.gguf file was found in the model's folder."))
 
     def _rename(self) -> None:
         if self.entry and self.name_edit.text().strip() and self.name_edit.text().strip() != self.entry.name:

@@ -17,6 +17,12 @@ def _install_excepthook() -> None:
                 f.write("--- %s ---\n%s\n" % (time.ctime(), text))
         except OSError:
             pass
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or "--selftest" in sys.argv:
+            try:
+                sys.__stderr__.write(text)
+            except Exception:
+                pass
+            os._exit(1)                      # headless self-test: fail fast instead of waiting for a dialog
         try:
             from PyQt6.QtWidgets import QApplication, QMessageBox
             if QApplication.instance() is not None:

@@ -5,7 +5,7 @@
 
 #define MyAppName "Notus"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "0.2.0"
 #endif
 #define MyAppPublisher "RonovaDev"
 ; TODO: put the real link to your repository here (same as REPO_URL in notus/__init__.py)

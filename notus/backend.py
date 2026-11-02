@@ -16,7 +16,7 @@ from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, Qt, QThread, py
 from PyQt6.QtWidgets import QApplication
 
 from . import paths
-from .config import ModelEntry
+from .config import ModelEntry, vision_active
 from .estimator import auto_gpu_layers
 from .gguf import GGUFError, read_gguf
 from .hardware import GPU, NO_WINDOW, Hardware, parse_devices, pick_device
@@ -53,7 +53,7 @@ def _backend_env(bd: Path) -> dict:
 def probe_caps(exe: Path) -> Caps:
     try:
         r = subprocess.run([str(exe), "--help"], capture_output=True, timeout=60,
-                           cwd=str(exe.parent), creationflags=NO_WINDOW, env=_backend_env(exe.parent))
+                           cwd=str(exe.parent), creationflags=NO_WINDOW, env=_backend_env(exe.parent), stdin=subprocess.DEVNULL)
         text = (r.stdout + r.stderr).decode("utf-8", "replace")
     except (OSError, subprocess.SubprocessError) as e:
         return Caps(error=str(e))
@@ -71,7 +71,7 @@ def backend_has_gpu(bd: Path) -> bool:
 def list_devices(exe: Path) -> list[GPU]:
     try:
         r = subprocess.run([str(exe), "--list-devices"], capture_output=True, timeout=90,
-                           cwd=str(exe.parent), creationflags=NO_WINDOW, env=_backend_env(exe.parent))
+                           cwd=str(exe.parent), creationflags=NO_WINDOW, env=_backend_env(exe.parent), stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return []
     return parse_devices((r.stdout + r.stderr).decode("utf-8", "replace"))
@@ -83,7 +83,7 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def build_args(entry: ModelEntry, caps: Caps, port: int, ngl: int, hw: Hardware, device_args=()) -> list[str]:
+def build_args(entry: ModelEntry, caps: Caps, port: int, ngl: int, hw: Hardware, device_args=(), vision: bool = False) -> list[str]:
     L = entry.load
     threads = L.n_threads or max(1, hw.cores_physical)
     tbatch = L.n_threads_batch or max(1, hw.cores_logical)
@@ -110,6 +110,12 @@ def build_args(entry: ModelEntry, caps: Caps, port: int, ngl: int, hw: Hardware,
         a.append("--jinja")
     if L.chat_template.strip():
         a += ["--chat-template", L.chat_template.strip()]
+    if vision and entry.mmproj and caps.has("--mmproj"):
+        a += ["--mmproj", entry.mmproj]
+        if L.image_max_tokens > 0 and caps.has("--image-max-tokens"):
+            a += ["--image-max-tokens", str(L.image_max_tokens)]
+    if L.reasoning_budget >= 0 and caps.has("--reasoning-budget"):
+        a += ["--reasoning-budget", str(L.reasoning_budget)]
     if L.extra_args.strip():
         a += [t.strip('"') for t in shlex.split(L.extra_args, posix=(os.name != "nt"))]
     return a
@@ -159,6 +165,7 @@ class ServerManager(QObject):
         self.proc: QProcess | None = None
         self.gpu: GPU | None = None
         self._device_args: list[str] = []
+        self._vision = False
         self.cur_ngl = 0
         self._stopping = False
         self._auto_ngl = False
@@ -170,6 +177,10 @@ class ServerManager(QObject):
         self._exe: Path | None = None
         self._caps = Caps()
         self._hw = Hardware()
+
+    @property
+    def vision_loaded(self) -> bool:
+        return self._vision and self.state != "unloaded"
 
     @property
     def pid(self) -> int:
@@ -224,6 +235,7 @@ class ServerManager(QObject):
             ngl = entry.load.n_gpu_layers
         self.log_line.emit("[notus] device: %s" % (("%s (%s, %d MiB free)" % (dev.dev_id, dev.name, dev.free_mb)) if dev else "CPU"))
         self.entry, self._exe, self._caps, self._hw, self._retries = entry, exe, caps, hw, 0
+        self._vision = vision_active(entry, settings)
         self.port = settings.port or free_port()
         self._start(ngl)
 
@@ -252,7 +264,7 @@ class ServerManager(QObject):
         self.cur_ngl = ngl
         self._tail.clear()
         self._buf = ""
-        args = build_args(self.entry, self._caps, self.port, ngl, self._hw, self._device_args)
+        args = build_args(self.entry, self._caps, self.port, ngl, self._hw, self._device_args, self._vision)
         self.log_line.emit("[notus] " + " ".join([self._exe.name] + args))
         p = QProcess(self)
         p.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)

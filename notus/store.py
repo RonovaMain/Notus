@@ -9,7 +9,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from . import paths
-from .config import AppSettings, ModelEntry, from_dict
+from .config import AppSettings, Assistant, ModelEntry, from_dict
 
 
 def _norm(p: str) -> str:
@@ -36,8 +36,10 @@ class Store(QObject):
         except (OSError, ValueError):
             raw = {}
         models = [ModelEntry.from_dict(m) for m in raw.pop("models", []) if isinstance(m, dict)]
+        assistants = [Assistant.from_dict(a) for a in raw.pop("assistants", []) if isinstance(a, dict)]
         self.s = from_dict(AppSettings, raw)
         self.s.models = [m for m in models if m.path]
+        self.s.assistants = [a for a in assistants if a.name]
 
     def save(self) -> None:
         data = asdict(self.s)
@@ -56,6 +58,12 @@ class Store(QObject):
         self._timer.start(ms)
 
     # ---- model library -------------------------------------------------
+    def get_assistant(self, assistant_id):
+        for a in self.s.assistants:
+            if a.id == assistant_id:
+                return a
+        return None
+
     def get_model(self, model_id) -> ModelEntry | None:
         for m in self.s.models:
             if m.id == model_id:
