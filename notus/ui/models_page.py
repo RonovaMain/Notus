@@ -13,7 +13,9 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QGridLay
 from .. import paths
 from ..backend import backend_has_gpu
 from ..attachments import find_mmproj
-from ..config import LoadSettings, ModelEntry
+import dataclasses
+
+from ..config import LoadSettings, ModelEntry, effective_batches, vision_active
 from ..estimator import auto_gpu_layers, estimate, suggest_defaults
 from ..gguf import GGUFError, is_first_shard_or_single, read_gguf
 from ..hardware import pick_device
@@ -288,7 +290,8 @@ class ModelsPage(QWidget):
         self.image_tokens = QSpinBox()
         self.image_tokens.setRange(0, 4096)
         self.image_tokens.setSingleStep(64)
-        self.image_tokens.setSpecialValueText(tr("Default"))
+        self.image_tokens.setSpecialValueText(tr("Auto"))
+        self.mm_cpu = QCheckBox(tr("Run the vision encoder on the CPU (saves VRAM, slower)"))
         rw = QWidget()
         rl = QHBoxLayout(rw)
         rl.setContentsMargins(0, 0, 0, 0)
@@ -297,8 +300,13 @@ class ModelsPage(QWidget):
         rl.addWidget(QLabel(tr("tokens per image:")))
         rl.addWidget(self.image_tokens)
         rl.addStretch(1)
-        self._add(g, tr("Thinking & images"), rw,
-                  tr("0 = no thinking at all. Fewer tokens per image = much faster on old hardware."))
+        rww = QWidget()
+        rwl = QVBoxLayout(rww)
+        rwl.setContentsMargins(0, 0, 0, 0)
+        rwl.addWidget(rw)
+        rwl.addWidget(self.mm_cpu)
+        self._add(g, tr("Thinking & images"), rww,
+                  tr("0 = no thinking at all. Fewer tokens per image = faster and less memory; the micro-batch is raised automatically to fit one image."))
 
         self.extra = QLineEdit()
         self.extra.setPlaceholderText("--rope-freq-base 10000 --no-warmup")
@@ -322,6 +330,7 @@ class ModelsPage(QWidget):
         self.vision_cb.toggled.connect(self._changed)
         self.reasoning.valueChanged.connect(self._changed)
         self.image_tokens.valueChanged.connect(self._changed)
+        self.mm_cpu.toggled.connect(self._changed)
         for sp in (self.n_ctx, self.threads, self.threads_b, self.n_batch, self.n_ubatch):
             sp.valueChanged.connect(self._changed)
         self.ngl.valueChanged.connect(self._changed)
@@ -467,6 +476,7 @@ class ModelsPage(QWidget):
         self.vision_cb.setChecked(e.vision)
         self.reasoning.setValue(L.reasoning_budget)
         self.image_tokens.setValue(L.image_max_tokens)
+        self.mm_cpu.setChecked(L.mmproj_on_cpu)
         self._loading = False
         self._refresh_info()
         self._refresh_planner()
@@ -484,6 +494,7 @@ class ModelsPage(QWidget):
         L.use_mmap, L.use_mlock, L.jinja = self.mmap.isChecked(), self.mlock.isChecked(), self.jinja.isChecked()
         L.chat_template, L.extra_args = self.template.currentText().strip(), self.extra.text().strip()
         L.reasoning_budget, L.image_max_tokens = self.reasoning.value(), self.image_tokens.value()
+        L.mmproj_on_cpu = self.mm_cpu.isChecked()
         self.entry.mmproj = self.mmproj.text().strip()
         self.entry.vision = self.vision_cb.isChecked() and bool(self.entry.mmproj)
 
@@ -574,14 +585,24 @@ class ModelsPage(QWidget):
             return
         c, hw, L, info = self.ctx.colors, self.ctx.hw, self.entry.load, self.info
         gpu_ok = self._gpu_ok()
+        vis = vision_active(self.entry, self.ctx.store.s)
+        _b, ub_eff, cap = effective_batches(L, vis, self._vram_total())
+        mm_mb = 0.0
+        if vis:
+            try:
+                mm_mb = os.path.getsize(self.entry.mmproj) / 1048576
+            except OSError:
+                mm_mb = 0.0
+        L_eff = dataclasses.replace(L, n_ubatch=ub_eff)
         if L.n_gpu_layers < 0:
-            ngl = auto_gpu_layers(info, L, self._device().free_mb) if gpu_ok else 0
+            ngl = auto_gpu_layers(info, L_eff, self._device().free_mb - (0 if L.mmproj_on_cpu else mm_mb)) if gpu_ok else 0
             self._loading = True
             self.ngl.set_value(ngl)
             self._loading = False
         else:
             ngl = L.n_gpu_layers
-        est = estimate(info, L, ngl, gpu_ok)
+        on_cpu = L.mmproj_on_cpu
+        est = estimate(info, L_eff, ngl, gpu_ok, 0.0 if on_cpu else mm_mb, mm_mb if on_cpu else 0.0)
         cyan = "#1fb6d4"
         if gpu_ok:
             self.bar_vram.set_data("VRAM — " + self._device().name, [
@@ -603,6 +624,11 @@ class ModelsPage(QWidget):
             notes.append(warn + tr("More than the RAM: pages will be streamed from SSD through mmap. It works, but slowly. Keep mmap on and mlock off.") + "</span>")
         if L.use_mlock and est.ram_mb > hw.ram_free_mb:
             notes.append(bad + tr("mlock needs more free RAM than is available right now.") + "</span>")
+        if vis:
+            notes.append(tr("Vision is on: up to {cap} tokens per image, micro-batch raised to {ub} automatically, projector ≈ {mb} MB.").format(
+                cap=cap, ub=ub_eff, mb=int(mm_mb)))
+            if L.n_ctx < 3072:
+                notes.append(warn + tr("With images use a context of at least 4096 tokens.") + "</span>")
         if info.n_ctx_train and L.n_ctx > info.n_ctx_train:
             notes.append(warn + tr("The context is larger than the model was trained for ({n}); quality may drop.").format(n=info.n_ctx_train) + "</span>")
         if L.cache_type_v not in ("f16", "f32", "bf16") and L.flash_attn == "off":

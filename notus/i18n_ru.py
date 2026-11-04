@@ -277,4 +277,9 @@ RU = {
     'Remote access & API page': 'Страница «Удалённо и API»',
     'Live RAM / VRAM monitor in the status bar': 'Монитор RAM / VRAM в строке состояния',
     'A disabled module is not loaded and uses no memory or processor time. Vision is additionally switched on per model in “Models”.': 'Выключенный модуль не загружается и не тратит ни память, ни процессор. Зрение дополнительно включается для каждой модели в «Моделях».',
+    'Run the vision encoder on the CPU (saves VRAM, slower)': 'Запускать кодировщик зрения на процессоре (экономит VRAM, медленнее)',
+    '0 = no thinking at all. Fewer tokens per image = faster and less memory; the micro-batch is raised automatically to fit one image.': '0 = без размышлений вообще. Меньше токенов на картинку — быстрее и меньше памяти; микро-батч автоматически увеличивается под одну картинку.',
+    'Vision is on: up to {cap} tokens per image, micro-batch raised to {ub} automatically, projector ≈ {mb} MB.': 'Зрение включено: до {cap} токенов на картинку, микро-батч автоматически увеличен до {ub}, проектор ≈ {mb} МБ.',
+    'With images use a context of at least 4096 tokens.': 'Для работы с картинками нужен контекст не меньше 4096 токенов.',
+    'An image needs more tokens than the micro-batch allows. Lower “tokens per image” in Models.': 'Картинке нужно больше токенов, чем вмещает микро-батч. Уменьшите «токенов на картинку» в «Моделях».',
 }

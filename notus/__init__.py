@@ -1,6 +1,6 @@
 """Notus — a local GGUF chat GUI for old hardware (llama.cpp backend)."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.1"
 APP_NAME = "Notus"
 AUTHOR = "RonovaDev"
 # TODO: put the real link to your repository here

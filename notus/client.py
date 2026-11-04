@@ -30,11 +30,12 @@ def message_text(m: dict) -> str:
     return "\n\n".join(x for x in parts if x)
 
 
-def _cost(m: dict) -> int:
-    return approx_tokens(message_text(m)) + IMAGE_TOKENS * len(m.get("images") or []) + 8
+def _cost(m: dict, image_tokens: int = IMAGE_TOKENS) -> int:
+    return approx_tokens(message_text(m)) + image_tokens * len(m.get("images") or []) + 8
 
 
-def fit_messages(system: str, history: list, n_ctx: int, max_tokens: int, vision: bool = False) -> list[dict]:
+def fit_messages(system: str, history: list, n_ctx: int, max_tokens: int, vision: bool = False,
+                 image_tokens: int = IMAGE_TOKENS) -> list[dict]:
     """API messages that fit the context window (oldest turns dropped first).
 
     Only images of the newest user message are sent; older images become a short note (saves a lot of
@@ -48,7 +49,7 @@ def fit_messages(system: str, history: list, n_ctx: int, max_tokens: int, vision
     kept: list[tuple[int, dict]] = []
     for i in range(len(history) - 1, -1, -1):
         m = history[i]
-        cost = _cost(m) if (i == last_user and vision) else approx_tokens(message_text(m)) + 8
+        cost = _cost(m, image_tokens) if (i == last_user and vision) else approx_tokens(message_text(m)) + 8
         if kept and cost > budget:
             break
         kept.append((i, m))

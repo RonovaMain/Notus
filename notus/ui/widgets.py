@@ -204,7 +204,18 @@ class ChatView(QScrollArea):
         self.hint.setVisible(bool(text) and not self.bubbles)
 
     def _on_scroll(self, v: int) -> None:
-        self._stick = v >= self.verticalScrollBar().maximum() - 24
+        # follow the stream only while the view sits exactly at the bottom
+        self._stick = v >= self.verticalScrollBar().maximum() - 2
+
+    def wheelEvent(self, e) -> None:
+        if e.angleDelta().y() > 0:          # the user scrolls up: stop following immediately
+            self._stick = False
+        super().wheelEvent(e)
+
+    def keyPressEvent(self, e) -> None:
+        if e.key() in (Qt.Key.Key_Up, Qt.Key.Key_PageUp, Qt.Key.Key_Home):
+            self._stick = False
+        super().keyPressEvent(e)
 
     def _on_range(self, _mn: int, mx: int) -> None:
         if self._stick:

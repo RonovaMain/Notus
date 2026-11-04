@@ -226,9 +226,17 @@ def _make_handler(gw: Gateway):
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass                              # the client left; closing the backend connection stops generation
-            except OSError as e:
+            except (OSError, http.client.HTTPException) as e:      # includes IncompleteRead (backend crashed)
                 if not started:
                     self._error(502, "the model backend is not reachable: %s" % e)
+                else:                         # the stream was already open: finish it with an error event
+                    gw._note(self.client_address[0], True)
+                    try:
+                        msg = {"error": {"message": "The model on the computer stopped while answering (%s)." % e}}
+                        self.wfile.write(("data: %s\n\n" % json.dumps(msg)).encode("utf-8"))
+                        self.wfile.flush()
+                    except OSError:
+                        pass
             finally:
                 conn.close()
 

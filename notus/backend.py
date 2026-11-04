@@ -1,6 +1,7 @@
 """llama-server process management: start, health-check, auto-retry on GPU OOM, unload."""
 from __future__ import annotations
 
+import dataclasses
 import http.client
 import os
 import re
@@ -16,12 +17,13 @@ from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, Qt, QThread, py
 from PyQt6.QtWidgets import QApplication
 
 from . import paths
-from .config import ModelEntry, vision_active
+from .config import ModelEntry, effective_batches, vision_active
 from .estimator import auto_gpu_layers
 from .gguf import GGUFError, read_gguf
 from .hardware import GPU, NO_WINDOW, Hardware, parse_devices, pick_device
 from .i18n import tr
 
+_NONCAUSAL = re.compile(r"non-causal attention requires n_ubatch", re.I)
 _OOM = re.compile(r"out of memory|cudaMalloc failed|failed to allocate|ErrorOutOfDeviceMemory|allocateMemory", re.I)
 
 
@@ -83,14 +85,18 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def build_args(entry: ModelEntry, caps: Caps, port: int, ngl: int, hw: Hardware, device_args=(), vision: bool = False) -> list[str]:
+def build_args(entry: ModelEntry, caps: Caps, port: int, ngl: int, hw: Hardware, device_args=(), vision: bool = False,
+               vram_mb: int = 0) -> list[str]:
     L = entry.load
     threads = L.n_threads or max(1, hw.cores_physical)
     tbatch = L.n_threads_batch or max(1, hw.cores_logical)
+    batch, ubatch, cap = effective_batches(L, vision and caps.has("--mmproj"), vram_mb)
+    if vision and caps.has("--mmproj") and not caps.has("--image-max-tokens"):
+        batch = ubatch = max(batch, ubatch, 1024)      # old build: cannot cap image tokens, leave generous room
     a = [
         "-m", entry.path, "--host", "127.0.0.1", "--port", str(port),
         "-c", str(L.n_ctx), "-ngl", str(ngl), "-t", str(threads), "-tb", str(tbatch),
-        "-b", str(L.n_batch), "-ub", str(min(L.n_ubatch, L.n_batch)), "-np", "1",
+        "-b", str(batch), "-ub", str(ubatch), "-np", "1",
         "--cache-type-k", L.cache_type_k, "--cache-type-v", L.cache_type_v,
     ]
     a += list(device_args)
@@ -112,8 +118,10 @@ def build_args(entry: ModelEntry, caps: Caps, port: int, ngl: int, hw: Hardware,
         a += ["--chat-template", L.chat_template.strip()]
     if vision and entry.mmproj and caps.has("--mmproj"):
         a += ["--mmproj", entry.mmproj]
-        if L.image_max_tokens > 0 and caps.has("--image-max-tokens"):
-            a += ["--image-max-tokens", str(L.image_max_tokens)]
+        if caps.has("--image-max-tokens"):
+            a += ["--image-max-tokens", str(cap)]
+        if L.mmproj_on_cpu and caps.has("--no-mmproj-offload"):
+            a.append("--no-mmproj-offload")
     if L.reasoning_budget >= 0 and caps.has("--reasoning-budget"):
         a += ["--reasoning-budget", str(L.reasoning_budget)]
     if L.extra_args.strip():
@@ -166,6 +174,7 @@ class ServerManager(QObject):
         self.gpu: GPU | None = None
         self._device_args: list[str] = []
         self._vision = False
+        self._vram = 0
         self.cur_ngl = 0
         self._stopping = False
         self._auto_ngl = False
@@ -230,12 +239,22 @@ class ServerManager(QObject):
         if dev is None:
             ngl = 0
         elif self._auto_ngl:
-            ngl = auto_gpu_layers(info, entry.load, dev.free_mb) if info else 99
+            vis = vision_active(entry, settings)
+            _b, ub_eff, _cap = effective_batches(entry.load, vis, dev.total_mb)
+            reserve = 0.0
+            if vis and not entry.load.mmproj_on_cpu:
+                try:
+                    reserve = os.path.getsize(entry.mmproj) / 1048576
+                except OSError:
+                    reserve = 0.0
+            sized = dataclasses.replace(entry.load, n_ubatch=ub_eff)
+            ngl = auto_gpu_layers(info, sized, dev.free_mb - reserve) if info else 99
         else:
             ngl = entry.load.n_gpu_layers
         self.log_line.emit("[notus] device: %s" % (("%s (%s, %d MiB free)" % (dev.dev_id, dev.name, dev.free_mb)) if dev else "CPU"))
         self.entry, self._exe, self._caps, self._hw, self._retries = entry, exe, caps, hw, 0
         self._vision = vision_active(entry, settings)
+        self._vram = dev.total_mb if dev else 0
         self.port = settings.port or free_port()
         self._start(ngl)
 
@@ -264,7 +283,7 @@ class ServerManager(QObject):
         self.cur_ngl = ngl
         self._tail.clear()
         self._buf = ""
-        args = build_args(self.entry, self._caps, self.port, ngl, self._hw, self._device_args, self._vision)
+        args = build_args(self.entry, self._caps, self.port, ngl, self._hw, self._device_args, self._vision, self._vram)
         self.log_line.emit("[notus] " + " ".join([self._exe.name] + args))
         p = QProcess(self)
         p.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -329,7 +348,9 @@ class ServerManager(QObject):
             return
         self._set_state("unloaded")
         parts = [tr("The backend stopped unexpectedly (exit code {code}).").format(code=code)]
-        if _OOM.search(tail):
+        if _NONCAUSAL.search(tail):
+            parts.append(tr("An image needs more tokens than the micro-batch allows. Lower “tokens per image” in Models."))
+        elif _OOM.search(tail):
             parts.append(tr("Not enough memory. Lower the context size or the number of GPU layers."))
         parts.append(tail)
         self.failed.emit("\n\n".join(x for x in parts if x))

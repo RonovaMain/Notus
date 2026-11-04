@@ -12,7 +12,8 @@ from PyQt6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel
 from .. import assistants as assistants_mod
 from ..attachments import AttachmentError, image_to_data_url, kind_of, qimage_to_data_url, read_document
 from ..client import ChatWorker, approx_tokens, fit_messages, message_text, split_think
-from ..config import vision_active
+from ..config import image_cap, image_side, vision_active
+from ..hardware import pick_device
 from ..i18n import tr
 from .widgets import ChatView, SliderSpin
 
@@ -374,6 +375,11 @@ class ChatPage(QWidget):
     def _vision_ok(self) -> bool:
         return vision_active(self.current_entry(), self.ctx.store.s)
 
+    def _image_cap(self) -> int:
+        e = self.current_entry() or self.ctx.server.entry
+        dev = pick_device(self.ctx.devices, self.ctx.store.s.device)
+        return image_cap(e.load, dev.total_mb if dev else 0) if e else 512
+
     def _max_file_chars(self) -> int:
         e = self.current_entry()
         n_ctx = e.load.n_ctx if e else 4096
@@ -396,7 +402,7 @@ class ChatPage(QWidget):
                     if not self._vision_ok():
                         problems.append("%s: %s" % (name, tr("images are off: enable vision for this model in “Models” (and in Settings → Modules)")))
                         continue
-                    self.pending_images.append(image_to_data_url(f))
+                    self.pending_images.append(image_to_data_url(f, image_side(self._image_cap())))
                 elif kind == "file":
                     text, truncated = read_document(f, self._max_file_chars())
                     self.pending_files.append({"name": name, "text": text, "truncated": truncated})
@@ -416,7 +422,7 @@ class ChatPage(QWidget):
         if not self._vision_ok():
             self.lbl_info.setText("⚠ " + tr("images are off: enable vision for this model in “Models” (and in Settings → Modules)"))
             return
-        self.pending_images.append(qimage_to_data_url(img))
+        self.pending_images.append(qimage_to_data_url(img, image_side(self._image_cap())))
         self._refresh_chips()
 
     def _refresh_chips(self) -> None:
@@ -518,7 +524,8 @@ class ChatPage(QWidget):
             think = "auto"
         s = self.ctx.store.s
         vision = vision_active(entry, s) and srv.vision_loaded
-        msgs = fit_messages(gen.system_prompt, self.chat.messages, entry.load.n_ctx, gen.max_tokens, vision)
+        msgs = fit_messages(gen.system_prompt, self.chat.messages, entry.load.n_ctx, gen.max_tokens, vision,
+                            image_cap(entry.load, srv._vram))
         self._buf, self._rbuf, self._failed = "", "", False
         self._bubble = self.view.add_bubble("assistant")
         self._bubble.set_content("")

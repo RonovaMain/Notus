@@ -10,7 +10,7 @@ import psutil
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from . import __version__
-from .config import vision_active
+from .config import image_cap, image_side, vision_active
 from .gateway import Controller, Gateway
 
 
@@ -95,8 +95,9 @@ class ShareController(QObject, Controller):
                   for m in list(s.models)]
         assistants = [] if not s.mod_assistants else [{"id": a.id, "name": a.name, "system_prompt": a.system_prompt, "temperature": a.temperature,
                        "think": a.think} for a in list(s.assistants)]
+        side = image_side(image_cap(cur.load, srv._vram)) if cur is not None else 768
         return {"state": srv.state, "loaded": cur.name if (ready and cur) else None, "models": models,
-                "assistants": assistants}
+                "assistants": assistants, "image_side": side}
 
     def _find(self, requested):
         if not requested:

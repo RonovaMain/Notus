@@ -30,7 +30,8 @@ class LoadSettings:
     jinja: bool = True
     chat_template: str = ""         # empty = use the template stored in the GGUF
     reasoning_budget: int = -1      # -1 = unlimited, 0 = no thinking at all, N = max thinking tokens
-    image_max_tokens: int = 0       # 0 = model default; lower = faster image processing on old hardware
+    image_max_tokens: int = 0       # 0 = automatic (512 on small GPUs, else 1024); lower = faster on old hardware
+    mmproj_on_cpu: bool = False     # run the vision encoder on the CPU (saves VRAM, slower)
     extra_args: str = ""
 
 
@@ -133,3 +134,27 @@ class AppSettings:
 def vision_active(entry, settings) -> bool:
     """True if images can be used with this model right now (module on, projector enabled and present)."""
     return bool(settings.mod_vision and entry is not None and entry.vision and entry.mmproj and os.path.isfile(entry.mmproj))
+
+
+def image_cap(load, vram_total_mb: int) -> int:
+    """Maximum number of tokens one image may use."""
+    if load.image_max_tokens > 0:
+        return load.image_max_tokens
+    return 512 if vram_total_mb <= 6144 else 1024
+
+
+def image_side(cap: int) -> int:
+    """Longest image edge (pixels) that makes sense for a given token cap (≈ 28 px per token row)."""
+    return max(336, min(1344, int(28 * cap ** 0.5)))
+
+
+def effective_batches(load, vision: bool, vram_total_mb: int) -> tuple[int, int, int]:
+    """(n_batch, n_ubatch, image_cap). Vision encoders use non-causal attention: all tokens of one image must
+    fit into a single micro-batch, otherwise llama.cpp aborts (GGML_ASSERT n_ubatch >= n_tokens)."""
+    ub, b = load.n_ubatch, load.n_batch
+    cap = image_cap(load, vram_total_mb)
+    if vision:
+        need = ((cap + 64 + 127) // 128) * 128
+        ub = max(ub, need)
+        b = max(b, ub)
+    return b, min(ub, b), cap

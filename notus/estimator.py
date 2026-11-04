@@ -51,7 +51,8 @@ class Estimate:
         return self.weights_cpu_mb + self.kv_cpu_mb + self.runtime_cpu_mb
 
 
-def estimate(info: GGUFInfo, load: LoadSettings, ngl: int, gpu_ok: bool) -> Estimate:
+def estimate(info: GGUFInfo, load: LoadSettings, ngl: int, gpu_ok: bool, extra_gpu_mb: float = 0.0,
+             extra_cpu_mb: float = 0.0) -> Estimate:
     n_layers = info.n_layers or 32
     total = n_layers + 1                      # + output layer
     ngl = max(0, min(ngl, total)) if gpu_ok else 0
@@ -60,7 +61,11 @@ def estimate(info: GGUFInfo, load: LoadSettings, ngl: int, gpu_ok: bool) -> Esti
     kv = kv_cache_mb(info, load.n_ctx, load.cache_type_k, load.cache_type_v)
     kv_gpu = kv * min(ngl, n_layers) / n_layers
     over = (GPU_CONTEXT_MB + compute_buffer_mb(load.n_ubatch)) if ngl > 0 else 0.0
-    return Estimate(ngl, total, w_gpu, info.size_mb - w_gpu, kv_gpu, kv - kv_gpu, over, RUNTIME_MB)
+    if not gpu_ok:
+        extra_cpu_mb += extra_gpu_mb
+        extra_gpu_mb = 0.0
+    return Estimate(ngl, total, w_gpu, info.size_mb - w_gpu, kv_gpu, kv - kv_gpu, over + extra_gpu_mb,
+                    RUNTIME_MB + extra_cpu_mb)
 
 
 def auto_gpu_layers(info: GGUFInfo, load: LoadSettings, vram_free_mb: float, margin_mb: float = 150) -> int:
